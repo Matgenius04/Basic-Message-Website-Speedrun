@@ -6,6 +6,7 @@ use std::sync::Arc;
 use authorization::{create_token, get_username_from_token_if_valid, hash_password};
 use db::Db;
 use futures::{SinkExt, StreamExt};
+use log::{error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{
     select,
@@ -43,7 +44,14 @@ struct LoginInfo {
 }
 
 fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Error> {
+    trace!(
+        "Attempting to create an account for {}",
+        &login_info.username
+    );
+
     if db.contains(&login_info.username)? {
+        trace!("Attempted to create an account that already exists");
+
         return Ok(Response::builder()
             .status(409)
             .body("The username already exists".to_owned())?);
@@ -61,26 +69,42 @@ fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, an
 
     db.add(&user)?;
 
+    info!("Created a new account for {}", &login_info.username);
+
     Ok(Response::builder()
         .status(200)
         .body(create_token(&login_info.username)?)?)
 }
 
 fn login(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Error> {
+    trace!("Login attempt for {}", &login_info.username);
+
     let user = match db.get(&login_info.username)? {
         Some(user) => user,
         None => {
+            trace!(
+                "Login attempt failed because `{}` doesn't exist",
+                &login_info.username
+            );
+
             return Ok(Response::builder()
                 .status(409)
-                .body("The username doesn't exist".to_string())?)
+                .body("The username doesn't exist".to_string())?);
         }
     };
 
     if user.password_hash != hash_password(&login_info.password, user.salt) {
+        warn!(
+            "Login attempt for `{}` failed because of incorrect password",
+            &login_info.username
+        );
+
         return Ok(Response::builder()
             .status(403)
             .body("The password is incorrect".to_owned())?);
     }
+
+    info!("{} logged in", &login_info.username);
 
     Ok(Response::builder()
         .status(200)
@@ -89,6 +113,8 @@ fn login(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Err
 
 #[tokio::main]
 async fn main() {
+    pretty_env_logger::init();
+
     let db = Db::open("users");
 
     let create_account_db = db.to_owned();
@@ -97,7 +123,10 @@ async fn main() {
         .map(
             move |login_info: LoginInfo| match create_account(&create_account_db, login_info) {
                 Ok(reply) => Ok(reply),
-                Err(e) => Response::builder().status(500).body(e.to_string()),
+                Err(e) => {
+                    error!("There was an error creating an account: {e:?}");
+                    Response::builder().status(500).body(e.to_string())
+                }
             },
         );
 
@@ -107,7 +136,10 @@ async fn main() {
         .map(
             move |login_info: LoginInfo| match login(&login_db, login_info) {
                 Ok(reply) => Ok(reply),
-                Err(e) => Response::builder().status(500).body(e.to_string()),
+                Err(e) => {
+                    error!("There was an error logging someone in: {e:?}");
+                    Response::builder().status(500).body(e.to_string())
+                }
             },
         );
 
@@ -118,6 +150,8 @@ async fn main() {
         .and(warp::any().map(move || message_tx.to_owned()))
         .map(|ws: Ws, message_tx: broadcast::Sender<Message>| {
             ws.on_upgrade(move |mut socket| async move {
+                trace!("Someone made a websocket connection");
+            
                 let message_tx = message_tx.to_owned();
                 let mut message_rx = message_tx.subscribe();
 
@@ -134,20 +168,23 @@ async fn main() {
                             let message = match maybe_message {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    eprintln!("{e}");
+                                    error!("Recieving a websocket message failed: {e}");
                                     continue;
                                 }
                             };
 
                             let text = match message.to_str() {
                                 Ok(v) => v,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    trace!("Someone sent a websocket message that isn't a string");
+                                    continue;
+                                },
                             };
 
                             let signal: WebsocketSignal = match serde_json::from_str(text) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    eprintln!("{e}");
+                                    trace!("Someone sent a websocket message that can't be decoded as a signal: {e}");
                                     continue;
                                 }
                             };
@@ -155,11 +192,19 @@ async fn main() {
                             match (signal, &username) {
                                 (WebsocketSignal::Authorization(auth_string), None) => {
                                     username = match get_username_from_token_if_valid(&auth_string) {
-                                        Some(username) => Some(Arc::from(username)),
-                                        None => break
+                                        Some(username) => {
+                                            info!("{username} authenticated for the chatroom");
+                                            Some(Arc::from(username))
+                                        },
+                                        None => {
+                                            warn!("Someone failed to authenticate the websocket");
+                                            break
+                                        }
                                     }
                                 }
                                 (WebsocketSignal::Message(message), Some(username)) => {
+                                    info!(target: "chat", "<{username}> {message}");
+                                    
                                     let _ = message_tx.send(Message {
                                         author: Arc::clone(username),
                                         message: Arc::from(message),
@@ -174,7 +219,7 @@ async fn main() {
                                 Ok(v) => v,
                                 Err(RecvError::Closed) => break,
                                 Err(RecvError::Lagged(amt)) => {
-                                    eprintln!("Receiver lagged by {amt} messages");
+                                    warn!("Receiver lagged by {amt} messages");
                                     continue
                                 },
                             };
@@ -182,11 +227,11 @@ async fn main() {
                             if let Err(e) = socket.send(ws::Message::text(match serde_json::to_string(&sent_message) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    eprintln!("{e}");
+                                    error!("Failed to encode a message as json {e}");
                                     continue
                                 }
                             })).await {
-                                eprintln!("{e}");
+                                error!("All of the senders dropped: {e}");
                                 continue
                             }
                         }
@@ -199,6 +244,8 @@ async fn main() {
     let post = warp::post().and(create_account.or(login));
 
     let routes = get.or(post);
+
+    info!("Serving");
 
     warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
 }
