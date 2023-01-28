@@ -39,7 +39,7 @@ fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, an
     let password_hash = hash_password(&login_info.password, salt);
 
     let user = User {
-        username: login_info.username,
+        username: login_info.username.to_owned(),
         salt,
         password_hash,
     };
@@ -48,17 +48,49 @@ fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, an
 
     Ok(Response::builder()
         .status(200)
-        .body(Token::create(login_info.password)?)?)
+        .body(Token::create(login_info.username)?)?)
+}
+
+fn login(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Error> {
+    let user = match db.get(&login_info.username)? {
+        Some(user) => user,
+        None => {
+            return Ok(Response::builder()
+                .status(409)
+                .body("The username doesn't exist".to_string())?)
+        }
+    };
+
+    if user.password_hash != hash_password(&login_info.password, user.salt) {
+        return Ok(Response::builder()
+            .status(403)
+            .body("The password is incorrect".to_owned())?);
+    }
+
+    Ok(Response::builder()
+        .status(200)
+        .body(Token::create(login_info.username)?)?)
 }
 
 #[tokio::main]
 async fn main() {
     let db = Db::open("users");
 
+    let create_account_db = db.to_owned();
     let create_account = warp::path!("api" / "create-account")
         .and(warp::body::json::<LoginInfo>())
         .map(
-            move |login_info: LoginInfo| match create_account(&db, login_info) {
+            move |login_info: LoginInfo| match create_account(&create_account_db, login_info) {
+                Ok(reply) => Ok(reply),
+                Err(e) => Response::builder().status(500).body(e.to_string()),
+            },
+        );
+
+    let login_db = db.to_owned();
+    let login = warp::path!("api" / "login")
+        .and(warp::body::json::<LoginInfo>())
+        .map(
+            move |login_info: LoginInfo| match login(&login_db, login_info) {
                 Ok(reply) => Ok(reply),
                 Err(e) => Response::builder().status(500).body(e.to_string()),
             },
@@ -96,7 +128,7 @@ async fn main() {
     });
 
     let get = warp::get().and(ws_route.or(warp::fs::dir("../frontend/build")));
-    let post = warp::post().and(create_account);
+    let post = warp::post().and(create_account.or(login));
 
     let routes = get.or(post);
 

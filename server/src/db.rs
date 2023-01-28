@@ -13,7 +13,7 @@ impl Clone for Db {
 impl Db {
     pub fn open(string: &str) -> Db {
         Db(Arc::new(
-            sled::open("users").expect("the database to be available"),
+            sled::open(string).expect("the database to be available"),
         ))
     }
 
@@ -26,5 +26,12 @@ impl Db {
             .insert(user.username.as_bytes(), serde_json::to_vec(&user)?)?;
 
         Ok(())
+    }
+
+    pub fn get(&self, username: &str) -> Result<Option<User>, anyhow::Error> {
+        match self.0.get(username.as_bytes())? {
+            Some(v) => Ok(serde_json::from_slice(&v)?),
+            None => Ok(None),
+        }
     }
 }
