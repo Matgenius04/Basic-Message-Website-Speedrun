@@ -18,7 +18,7 @@ struct Message {
 pub struct User {
     username: String,
     salt: [u8; 32],
-    password_hash: [u8; 32],
+    password_hash: Vec<u8>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -36,7 +36,7 @@ fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, an
 
     let salt = rand::random::<[u8; 32]>();
 
-    let password_hash = hash_password(&login_info.password, salt)?;
+    let password_hash = hash_password(&login_info.password, salt);
 
     let user = User {
         username: login_info.username,

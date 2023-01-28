@@ -1,20 +1,17 @@
-use aes_gcm_siv::{
-    aead::{Aead, Payload},
-    Aes256GcmSiv, Key, KeyInit, Nonce,
-};
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
-static TOKEN_KEY: Lazy<Key<Aes256GcmSiv>> =
-    Lazy::new(|| *Key::<Aes256GcmSiv>::from_slice(&rand::random::<[u8; 32]>()));
+static TOKEN_KEY: Lazy<[u8; 32]> = Lazy::new(rand::random);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Token {
     username: String,
     expiration_time: i64,
     nonce: [u8; 12],
-    token: Vec<u8>,
+    mac: Vec<u8>,
 }
 
 impl Token {
@@ -27,17 +24,15 @@ impl Token {
             return None;
         }
 
-        let aes = Aes256GcmSiv::new(&*TOKEN_KEY);
+        let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(&*TOKEN_KEY).ok()?;
 
-        let _ = aes
-            .decrypt(
-                Nonce::from_slice(&token.nonce),
-                Payload {
-                    msg: &token.token,
-                    aad: &Token::aad(&token.username, token.expiration_time, token.nonce),
-                },
-            )
-            .ok()?;
+        mac_generator.update(&Token::aad(
+            &token.username,
+            token.expiration_time,
+            token.nonce,
+        ));
+
+        mac_generator.verify_slice(&token.mac).ok()?;
 
         Some(token)
     }
@@ -48,23 +43,15 @@ impl Token {
 
         let nonce: [u8; 12] = rand::random();
 
-        let random_data: [u8; 32] = rand::random();
+        let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(&*TOKEN_KEY)?;
 
-        let aes = Aes256GcmSiv::new(&*TOKEN_KEY);
-
-        let token = aes.encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: &random_data,
-                aad: &Token::aad(&username, expiration_time, nonce),
-            },
-        )?;
+        mac_generator.update(&Token::aad(&username, expiration_time, nonce));
 
         Ok(serde_json::to_string(&Token {
             username,
             expiration_time,
             nonce,
-            token,
+            mac: mac_generator.finalize().into_bytes().to_vec(),
         })?)
     }
 
@@ -73,10 +60,11 @@ impl Token {
     }
 }
 
-pub fn hash_password(password: &str, salt: [u8; 32]) -> Result<[u8; 32], bcrypt_pbkdf::Error> {
-    let mut hashed = [0; 32];
+pub fn hash_password(password: &str, salt: [u8; 32]) -> Vec<u8> {
+    let mut hasher = Sha3_256::new();
 
-    bcrypt_pbkdf::bcrypt_pbkdf(password, &salt, 32, &mut hashed)?;
+    hasher.update(salt);
+    hasher.update(password);
 
-    Ok(hashed)
+    hasher.finalize().to_vec()
 }
