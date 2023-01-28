@@ -95,12 +95,10 @@ async fn main() {
         })
     });
 
-    let get = warp::get().and(ws_route);
+    let get = warp::get().and(ws_route.or(warp::fs::dir("../frontend/build")));
     let post = warp::post().and(create_account);
 
-    let static_assets = warp::get().and(warp::fs::dir("../frontend/build"));
-
-    let routes = static_assets.or(get).or(post);
+    let routes = get.or(post);
 
     warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
 }
