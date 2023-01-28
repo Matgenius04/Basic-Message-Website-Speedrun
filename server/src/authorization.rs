@@ -16,10 +16,10 @@ struct Token<'a> {
     mac: Vec<u8>,
 }
 
-pub fn get_username_from_token_if_valid<'a>(string: &'a str) -> Option<&'a str> {
+pub fn get_username_from_token_if_valid<'a>(string: &'a Secret<String>) -> Option<&'a str> {
     trace!("Decoding token");
 
-    let token: Token<'a> = serde_json::from_str(string).ok()?;
+    let token: Token<'a> = serde_json::from_str(string.expose_secret()).ok()?;
 
     let now = Utc::now().timestamp();
 
