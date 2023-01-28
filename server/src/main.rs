@@ -1,18 +1,27 @@
+mod authorization;
+
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use warp::{ws::Ws, Filter};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Message {
     author: String,
     message: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct User {
+    username: String,
+    password_hash: [u8; 32],
 }
 
 #[tokio::main]
 async fn main() {
     let (tx, rx) = broadcast::channel::<Message>(32);
 
-    let ws_route = warp::path("ws").and(warp::ws()).map(|ws: Ws| {
+    let ws_route = warp::path!("api" / "ws").and(warp::ws()).map(|ws: Ws| {
         ws.on_upgrade(|socket| async {
             let (mut tx, mut rx) = socket.split();
 
@@ -21,7 +30,20 @@ async fn main() {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("{e}");
-                        return;
+                        continue;
+                    }
+                };
+
+                let text = match message.to_str() {
+                    Ok(v) => v,
+                    Err(e) => continue,
+                };
+
+                let message: Message = match serde_json::from_str(text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        continue;
                     }
                 };
             }

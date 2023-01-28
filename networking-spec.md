@@ -34,6 +34,7 @@ This is a string formatted as:
   {
     username: string,
     expirationTime: number,
+    nonce: number[],
     token: number[],
   }
 ```
