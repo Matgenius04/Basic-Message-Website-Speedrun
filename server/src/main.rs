@@ -1,17 +1,32 @@
 mod authorization;
 mod db;
 
-use authorization::{hash_password, Token};
-use db::Db;
-use futures::StreamExt;
-use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
-use warp::{hyper::Response, ws::Ws, Filter};
+use std::sync::Arc;
 
-#[derive(Clone, Serialize, Deserialize)]
+use authorization::{create_token, get_username_from_token_if_valid, hash_password};
+use db::Db;
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    select,
+    sync::broadcast::{self, error::RecvError},
+};
+use warp::{
+    hyper::Response,
+    ws::{self, Ws},
+    Filter,
+};
+
+#[derive(Clone, Serialize)]
 struct Message {
-    author: String,
-    message: String,
+    author: Arc<str>,
+    message: Arc<str>,
+}
+
+#[derive(Clone, Deserialize)]
+enum WebsocketSignal {
+    Authorization(String),
+    Message(String),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,11 +59,11 @@ fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, an
         password_hash,
     };
 
-    db.add(user)?;
+    db.add(&user)?;
 
     Ok(Response::builder()
         .status(200)
-        .body(Token::create(login_info.username)?)?)
+        .body(create_token(&login_info.username)?)?)
 }
 
 fn login(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Error> {
@@ -69,7 +84,7 @@ fn login(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Err
 
     Ok(Response::builder()
         .status(200)
-        .body(Token::create(login_info.username)?)?)
+        .body(create_token(&login_info.username)?)?)
 }
 
 #[tokio::main]
@@ -96,36 +111,89 @@ async fn main() {
             },
         );
 
-    let (tx, rx) = broadcast::channel::<Message>(32);
+    let (message_tx, _) = broadcast::channel::<Message>(32);
 
-    let ws_route = warp::path!("api" / "ws").and(warp::ws()).map(|ws: Ws| {
-        ws.on_upgrade(|socket| async {
-            let (mut tx, mut rx) = socket.split();
+    let ws_route = warp::path!("api" / "ws")
+        .and(warp::ws())
+        .and(warp::any().map(move || message_tx.to_owned()))
+        .map(|ws: Ws, message_tx: broadcast::Sender<Message>| {
+            ws.on_upgrade(move |mut socket| async move {
+                let message_tx = message_tx.to_owned();
+                let mut message_rx = message_tx.subscribe();
 
-            while let Some(maybe_message) = rx.next().await {
-                let message = match maybe_message {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("{e}");
-                        continue;
-                    }
-                };
+                let mut username = None;
 
-                let text = match message.to_str() {
-                    Ok(v) => v,
-                    Err(e) => continue,
-                };
+                loop {
+                    select! {
+                        maybe_message_option = socket.next() => {
+                            let maybe_message = match maybe_message_option {
+                                Some(v) => v,
+                                None => break,
+                            };
 
-                let message: Message = match serde_json::from_str(text) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("{e}");
-                        continue;
-                    }
-                };
-            }
-        })
-    });
+                            let message = match maybe_message {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    continue;
+                                }
+                            };
+
+                            let text = match message.to_str() {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+
+                            let signal: WebsocketSignal = match serde_json::from_str(text) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    continue;
+                                }
+                            };
+
+                            match (signal, &username) {
+                                (WebsocketSignal::Authorization(auth_string), None) => {
+                                    username = match get_username_from_token_if_valid(&auth_string) {
+                                        Some(username) => Some(Arc::from(username)),
+                                        None => break
+                                    }
+                                }
+                                (WebsocketSignal::Message(message), Some(username)) => {
+                                    let _ = message_tx.send(Message {
+                                        author: Arc::clone(username),
+                                        message: Arc::from(message),
+                                    });
+                                }
+                                _ => break
+                            }
+                        }
+
+                        maybe_sent_message = message_rx.recv() => {
+                            let sent_message = match maybe_sent_message {
+                                Ok(v) => v,
+                                Err(RecvError::Closed) => break,
+                                Err(RecvError::Lagged(amt)) => {
+                                    eprintln!("Receiver lagged by {amt} messages");
+                                    continue
+                                },
+                            };
+
+                            if let Err(e) = socket.send(ws::Message::text(match serde_json::to_string(&sent_message) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    continue
+                                }
+                            })).await {
+                                eprintln!("{e}");
+                                continue
+                            }
+                        }
+                    };
+                }
+            })
+        });
 
     let get = warp::get().and(ws_route.or(warp::fs::dir("../frontend/build")));
     let post = warp::post().and(create_account.or(login));

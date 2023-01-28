@@ -21,9 +21,9 @@ impl Db {
         Ok(self.0.contains_key(username.as_bytes())?)
     }
 
-    pub fn add(&self, user: User) -> Result<(), anyhow::Error> {
+    pub fn add(&self, user: &User) -> Result<(), anyhow::Error> {
         self.0
-            .insert(user.username.as_bytes(), serde_json::to_vec(&user)?)?;
+            .insert(user.username.as_bytes(), serde_json::to_vec(user)?)?;
 
         Ok(())
     }
