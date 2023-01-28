@@ -7,6 +7,7 @@ use authorization::{create_token, get_username_from_token_if_valid, hash_passwor
 use db::Db;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, trace, warn};
+use secrecy::Secret;
 use serde::{Deserialize, Serialize};
 use tokio::{
     select,
@@ -40,7 +41,7 @@ pub struct User {
 #[derive(Clone, Deserialize)]
 struct LoginInfo {
     username: String,
-    password: String,
+    password: Secret<String>,
 }
 
 fn create_account(db: &Db, login_info: LoginInfo) -> Result<Response<String>, anyhow::Error> {

@@ -2,10 +2,11 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use log::{info, trace, warn};
 use once_cell::sync::Lazy;
+use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-static TOKEN_KEY: Lazy<[u8; 32]> = Lazy::new(rand::random);
+static TOKEN_KEY: Lazy<Secret<[u8; 32]>> = Lazy::new(|| Secret::new(rand::random()));
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Token<'a> {
@@ -27,7 +28,7 @@ pub fn get_username_from_token_if_valid<'a>(string: &'a str) -> Option<&'a str> 
         return None;
     }
 
-    let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(&*TOKEN_KEY).ok()?;
+    let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(TOKEN_KEY.expose_secret()).ok()?;
 
     mac_generator.update(&aad(token.username, token.expiration_time, token.nonce));
 
@@ -47,7 +48,7 @@ pub fn create_token(username: &str) -> Result<String, anyhow::Error> {
 
     let nonce: [u8; 12] = rand::random();
 
-    let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(&*TOKEN_KEY)?;
+    let mut mac_generator = Hmac::<Sha3_256>::new_from_slice(TOKEN_KEY.expose_secret())?;
 
     mac_generator.update(&aad(username, expiration_time, nonce));
 
@@ -63,13 +64,13 @@ fn aad(username: &str, expiration_time: i64, nonce: [u8; 12]) -> Vec<u8> {
     [username.as_bytes(), &expiration_time.to_be_bytes(), &nonce].concat()
 }
 
-pub fn hash_password(password: &str, salt: [u8; 32]) -> Vec<u8> {
+pub fn hash_password(password: &Secret<String>, salt: [u8; 32]) -> Vec<u8> {
     trace!("Hashing a password");
 
     let mut hasher = Sha3_256::new();
 
     hasher.update(salt);
-    hasher.update(password);
+    hasher.update(password.expose_secret());
 
     hasher.finalize().to_vec()
 }
