@@ -1,3 +1,5 @@
+The server will give a 400 error for any requests that are formatted wrong.
+
 # Accounts
 
 ## Creating an account

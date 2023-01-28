@@ -10,7 +10,7 @@ static TOKEN_KEY: Lazy<Key<Aes256GcmSiv>> =
     Lazy::new(|| *Key::<Aes256GcmSiv>::from_slice(&rand::random::<[u8; 32]>()));
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Token {
+pub struct Token {
     username: String,
     expiration_time: i64,
     nonce: [u8; 12],
@@ -42,7 +42,7 @@ impl Token {
         Some(token)
     }
 
-    pub fn create(username: String) -> Result<Token, aes_gcm_siv::Error> {
+    pub fn create(username: String) -> Result<String, anyhow::Error> {
         // Let them last a day
         let expiration_time = Utc::now().timestamp() + 60 * 60 * 24;
 
@@ -60,15 +60,23 @@ impl Token {
             },
         )?;
 
-        Ok(Token {
+        Ok(serde_json::to_string(&Token {
             username,
             expiration_time,
             nonce,
             token,
-        })
+        })?)
     }
 
     fn aad(username: &str, expiration_time: i64, nonce: [u8; 12]) -> Vec<u8> {
         [username.as_bytes(), &expiration_time.to_be_bytes(), &nonce].concat()
     }
+}
+
+pub fn hash_password(password: &str, salt: [u8; 32]) -> Result<[u8; 32], bcrypt_pbkdf::Error> {
+    let mut hashed = [0; 32];
+
+    bcrypt_pbkdf::bcrypt_pbkdf(password, &salt, 32, &mut hashed)?;
+
+    Ok(hashed)
 }
